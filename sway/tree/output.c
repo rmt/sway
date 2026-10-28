@@ -59,6 +59,8 @@ static void restore_workspaces(struct sway_output *output) {
 	// Saved workspaces
 	while (root->fallback_output->workspaces->length) {
 		struct sway_workspace *ws = root->fallback_output->workspaces->items[0];
+		struct wlr_box box;
+		wlr_output_layout_get_box(root->output_layout, output->wlr_output, &box);
 		workspace_detach(ws);
 		output_add_workspace(output, ws);
 
@@ -68,16 +70,18 @@ static void restore_workspaces(struct sway_output *output) {
 		// the floater is wider or taller than the output or is completely
 		// outside of the output's bounds, do the same as the output layout has
 		// likely changed and the maximum size needs to be checked and the
-		// floater re-centered
+		// floater re-centered. Use the current output layout box for these
+		// checks because cached output geometry is only updated later.
 		for (int i = 0; i < ws->floating->length; i++) {
 			struct sway_container *floater = ws->floating->items[i];
-			if (floater->pending.width == 0 || floater->pending.height == 0 ||
-					floater->pending.width > output->width ||
-					floater->pending.height > output->height ||
-					floater->pending.x > output->lx + output->width ||
-					floater->pending.y > output->ly + output->height ||
-					floater->pending.x + floater->pending.width < output->lx ||
-					floater->pending.y + floater->pending.height < output->ly) {
+			if (!wlr_box_empty(&box) &&
+					(floater->pending.width == 0 || floater->pending.height == 0 ||
+					floater->pending.width > box.width ||
+					floater->pending.height > box.height ||
+					floater->pending.x > box.x + box.width ||
+					floater->pending.y > box.y + box.height ||
+					floater->pending.x + floater->pending.width < box.x ||
+					floater->pending.y + floater->pending.height < box.y)) {
 				container_floating_resize_and_center(floater);
 			}
 		}
