@@ -1,4 +1,5 @@
 #include <float.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <wayland-server-core.h>
@@ -17,6 +18,7 @@
 #include "sway/scene_descriptor.h"
 #include "sway/tree/arrange.h"
 #include "sway/tree/container.h"
+#include "sway/tree/root.h"
 #include "sway/server.h"
 #include "sway/tree/view.h"
 #include "sway/tree/workspace.h"
@@ -575,6 +577,53 @@ static void handle_override_redirect(struct wl_listener *listener, void *data) {
 	}
 }
 
+static void configure_floating(struct sway_container *con,
+		struct wlr_xwayland_surface_configure_event *ev) {
+	// Like i3, don't let clients reconfigure fullscreen or hidden scratchpad views.
+	if (con->pending.fullscreen_mode || container_is_scratchpad_hidden(con)) {
+		return;
+	}
+
+	int min_width, max_width, min_height, max_height;
+	floating_calculate_constraints(&min_width, &max_width, &min_height, &max_height);
+	double x = ev->mask & XCB_CONFIG_WINDOW_X ? ev->x : con->pending.content_x;
+	double y = ev->mask & XCB_CONFIG_WINDOW_Y ? ev->y : con->pending.content_y;
+	double width = ev->mask & XCB_CONFIG_WINDOW_WIDTH ?
+		fmax(min_width, fmin(ev->width, max_width)) : con->pending.content_width;
+	double height = ev->mask & XCB_CONFIG_WINDOW_HEIGHT ?
+		fmax(min_height, fmin(ev->height, max_height)) : con->pending.content_height;
+
+	// Reject requests which would leave the entire frame outside the layout,
+	// including an empty layout. Don't reset established geometry on NOOP.
+	struct wlr_box box = {
+		.x = con->pending.x + x - con->pending.content_x,
+		.y = con->pending.y + y - con->pending.content_y,
+		.width = con->pending.width + width - con->pending.content_width,
+		.height = con->pending.height + height - con->pending.content_height,
+	};
+	if (!wlr_output_layout_intersects(root->output_layout, NULL, &box)) {
+		return;
+	}
+
+	if (ev->mask & XCB_CONFIG_WINDOW_WIDTH) {
+		con->view->natural_width = ev->width;
+	}
+	if (ev->mask & XCB_CONFIG_WINDOW_HEIGHT) {
+		con->view->natural_height = ev->height;
+	}
+	con->pending.content_x = x;
+	con->pending.content_y = y;
+	con->pending.content_width = width;
+	con->pending.content_height = height;
+	container_set_geometry_from_content(con);
+
+	// Reassign only across outputs, not to an active workspace on the same output.
+	struct sway_output *output = container_floating_find_output(con);
+	if (output && output != con->pending.workspace->output) {
+		container_floating_move_to(con, con->pending.x, con->pending.y);
+	}
+}
+
 static void handle_request_configure(struct wl_listener *listener, void *data) {
 	struct sway_xwayland_view *xwayland_view =
 		wl_container_of(listener, xwayland_view, request_configure);
@@ -587,16 +636,13 @@ static void handle_request_configure(struct wl_listener *listener, void *data) {
 		return;
 	}
 	if (container_is_floating(view->container)) {
-		// Respect minimum and maximum sizes
-		view->natural_width = ev->width;
-		view->natural_height = ev->height;
-		container_floating_resize_and_center(view->container);
+		configure_floating(view->container, ev);
 
 		configure(view, view->container->pending.content_x,
 				view->container->pending.content_y,
 				view->container->pending.content_width,
 				view->container->pending.content_height);
-		node_set_dirty(&view->container->node);
+		transaction_commit_dirty_client();
 	} else {
 		configure(view, view->container->current.content_x,
 				view->container->current.content_y,
